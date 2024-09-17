@@ -1,0 +1,251 @@
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <cmath>
+#include <iostream>
+#include <cstdlib> // 引入system命令所需的头文件
+#include <vector>
+
+#define N 9
+const float G = 1.186e-4f;  // 万有引力常数(重量单位:地球质量，距离单位:AU，时间单位:年)
+const float timestep = 0.0001f;  // 时间步长
+float zoomFactor = 1.0;
+float camX = 0.0, camY = 0.0;
+int mouseX, mouseY;
+bool dragging = false;
+GLuint fbo; // 帧缓冲对象
+GLuint texture; // 纹理对象
+
+struct Body {
+    float mass;          // 质量
+    float position[3];   // 位置（x, y, z）
+    float velocity[3];   // 速度（x, y, z）
+};
+
+std::vector<Body> bodies(N);
+
+void initFBO() {
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 800, 600, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Error: Framebuffer is not complete!" << std::endl;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+
+
+void initLighting() {
+    glEnable(GL_LIGHTING);  // 启用光照
+    glEnable(GL_LIGHT0);    // 启用光源0
+
+    GLfloat ambientLight[] = { 0.2f, 0.2f, 0.2f, 1.0f };  // 环境光
+    GLfloat diffuseLight[] = { 0.8f, 0.8f, 0.8f, 1.0f };  // 漫反射光
+    GLfloat specularLight[] = { 1.0f, 1.0f, 1.0f, 1.0f }; // 镜面反射光
+    GLfloat position[] = { 5.0f, 2.0f, 2.0f, 1.0f };      // 光源位置
+
+    glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuseLight);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, specularLight);
+    glLightfv(GL_LIGHT0, GL_POSITION, position);
+
+    GLfloat mat_ambient[] = { 0.7f, 0.7f, 0.7f, 1.0f };
+    GLfloat mat_diffuse[] = { 0.8f, 0.8f, 0.8f, 1.0f };
+    GLfloat mat_specular[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    GLfloat mat_shininess[] = { 50.0 };
+
+    glMaterialfv(GL_FRONT, GL_AMBIENT, mat_ambient);
+    glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_diffuse);
+    glMaterialfv(GL_FRONT, GL_SPECULAR, mat_specular);
+    glMaterialfv(GL_FRONT, GL_SHININESS, mat_shininess);
+}
+
+void initBodies() {
+    bodies[0] = { 332837.0f, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f} };     // 太阳
+    bodies[1] = { 0.055f, {0.387f, 0.0f, 0.0f}, {0.0f, 10.094f, 0.0f} };   // 水星
+    bodies[2] = { 0.815f, {0.723f, 0.0f, 0.0f}, {0.0f, 7.384f, 0.0f} };    // 金星
+    bodies[3] = { 1.000f, {1.000f, 0.0f, 0.0f}, {0.0f, 6.283f, 0.0f} };    // 地球
+    bodies[4] = { 0.107f, {1.524f, 0.0f, 0.0f}, {0.0f, 5.096f, 0.0f} };    // 火星
+    bodies[5] = { 317.82f,{5.203f, 0.0f, 0.0f}, {0.0f, 2.757f, 0.0f} };    // 木星
+    bodies[6] = { 95.16f, {9.537f, 0.0f, 0.0f}, {0.0f, 2.035f, 0.0f} };    // 土星
+    bodies[7] = { 14.371f, {19.191f, 0.0f, 0.0f}, {0.0f, 1.435f, 0.0f} };    // 天王星
+    bodies[8] = { 17.147f, {30.069f, 0.0f, 0.0f}, {0.0f, 1.146f, 0.0f} };    // 海王星
+
+}
+
+// 更新物体位置和速度
+void updateBodies() {
+    std::vector<std::vector<float>> forces(N, std::vector<float>(3, 0.0f));
+
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            float dx = bodies[j].position[0] - bodies[i].position[0];
+            float dy = bodies[j].position[1] - bodies[i].position[1];
+            float dz = bodies[j].position[2] - bodies[i].position[2];
+            float dist = sqrt(dx * dx + dy * dy + dz * dz);
+            float force = G * bodies[i].mass * bodies[j].mass / (dist * dist * dist);
+
+            forces[i][0] += force * dx;
+            forces[i][1] += force * dy;
+            forces[i][2] += force * dz;
+
+            forces[j][0] -= force * dx;
+            forces[j][1] -= force * dy;
+            forces[j][2] -= force * dz;
+        }
+    }
+
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < 3; j++) {
+            bodies[i].velocity[j] += forces[i][j] * timestep / bodies[i].mass;
+            bodies[i].position[j] += bodies[i].velocity[j] * timestep;
+        }
+    }
+}
+
+void reshape(int width, int height) {
+    if (height == 0) height = 1;
+    float aspect = (float)width / (float)height;
+
+    glViewport(0, 0, width, height);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+
+    gluPerspective(45.0, aspect, 0.1, 500.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+void renderPreviousFrame() {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glPushAttrib(GL_VIEWPORT_BIT);
+    glViewport(0, 0, 800, 600);
+
+    // 渲染之前帧的内容
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(-1, 1, -1, 1); // 使用正交投影
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glColor4f(0.0f, 0.0f, 0.0f, 0.1f); // 设置透明度
+
+    glBegin(GL_QUADS);
+    glVertex2f(-1, -1);
+    glVertex2f(1, -1);
+    glVertex2f(1, 1);
+    glVertex2f(-1, 1);
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+
+    glPopAttrib();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    gluLookAt(camX, camY, 100.0 / zoomFactor, camX, camY, 0.0, 0.0, 1.0, 0.0);
+
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+    
+    //printf("zoom factor %.4f\n", zoomFactor);
+
+    for (const auto& body : bodies) {
+        glPushMatrix();
+        glTranslatef(body.position[0], body.position[1], body.position[2]);
+        glColor3f(1.0, 0.0, 0.0);
+        float size = 0.01 * sqrt(body.mass);
+        if (size > 0.5)size = 0.5;
+        glutSolidSphere(size, 20, 20);
+        glPopMatrix();
+    }
+
+    glutSwapBuffers();
+}
+
+
+void mouseWheel(int button, int dir, int x, int y) {
+    if (dir > 0) {
+        zoomFactor /= 0.9; // Zoom out
+    }
+    else {
+        zoomFactor *= 0.9; // Zoom in
+    }
+    glutPostRedisplay();
+}
+
+void mouseButton(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        if (state == GLUT_DOWN) {
+            dragging = true;
+            mouseX = x;
+            mouseY = y;
+        }
+        else {
+            dragging = false;
+        }
+    }
+}
+
+void mouseMove(int x, int y) {
+    if (dragging) {
+        int dx = x - mouseX;
+        int dy = y - mouseY;
+        // 调整移动距离以考虑当前的缩放级别
+        // 因为zoomFactor在放大时变小，所以使用其倒数来增加移动距离
+        float adjustedZoomFactor = 100.0 / zoomFactor;  // 100.0是原始的观察距离
+        camX -= dx * 0.001 * adjustedZoomFactor;
+        camY += dy * 0.001 * adjustedZoomFactor;
+        mouseX = x;
+        mouseY = y;
+        glutPostRedisplay();
+    }
+}
+
+void timer(int value) {
+    updateBodies();
+    glutPostRedisplay();
+    glutTimerFunc(16, timer, 0);
+}
+
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(800, 600);
+    glutCreateWindow("Three-Body Problem");
+    glEnable(GL_DEPTH_TEST);
+
+    initBodies();
+    initLighting();  // 初始化光照
+
+    glutDisplayFunc(display);
+    glutTimerFunc(0, timer, 0);
+    glutReshapeFunc(reshape);
+    glutMouseWheelFunc(mouseWheel);
+    glutMouseFunc(mouseButton);
+    glutMotionFunc(mouseMove);
+
+    glutMainLoop();
+    return 0;
+}
